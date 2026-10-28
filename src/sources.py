@@ -1,6 +1,7 @@
 """各ショップからの取得（直営ショップのHTMLのみ。Yahoo!/楽天は使わない）。"""
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 import urllib.error
@@ -67,7 +68,51 @@ def _decode(raw: bytes, ctype: str) -> str:
         return raw.decode("utf-8", "replace")
 
 
+_BROWSER: dict = {}
+
+
+def use_browser() -> bool:
+    return os.environ.get("USE_BROWSER", "").lower() in ("1", "true", "yes")
+
+
+def _browser_get(url: str, timeout: int):
+    """本物のChromium(Playwright)で取得。Cloudflare等のTLS指紋チェックを通すため。"""
+    if "ctx" not in _BROWSER:
+        from playwright.sync_api import sync_playwright
+        pw = sync_playwright().start()
+        br = pw.chromium.launch(args=["--disable-blink-features=AutomationControlled"])
+        _BROWSER["pw"], _BROWSER["br"] = pw, br
+        _BROWSER["ctx"] = br.new_context(locale="ja-JP", timezone_id="Asia/Tokyo", user_agent=UA,
+                                         viewport={"width": 1366, "height": 768},
+                                         extra_http_headers={"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"})
+    page = _BROWSER["ctx"].new_page()
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+        for _ in range(8):  # 「Just a moment」等の確認画面が自動で消えるのを待つ
+            title = (page.title() or "").lower()
+            if "just a moment" not in title and "しばらくお待ち" not in title:
+                break
+            page.wait_for_timeout(1000)
+        page.wait_for_timeout(1500)
+        return (resp.status if resp else 0), page.content()
+    finally:
+        page.close()
+
+
+def close_browser() -> None:
+    try:
+        if "br" in _BROWSER:
+            _BROWSER["br"].close()
+        if "pw" in _BROWSER:
+            _BROWSER["pw"].stop()
+    except Exception:
+        pass
+    _BROWSER.clear()
+
+
 def http_get(url: str, headers: Optional[dict] = None, timeout: int = TIMEOUT):
+    if use_browser():
+        return _browser_get(url, timeout)
     req = urllib.request.Request(url, headers={**BROWSER_HEADERS, **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -272,5 +317,10 @@ def fetch_all(cfg: Config) -> list:
         except Exception as e:
             return SourceResult(name, ok=False, error=scrub(f"{type(e).__name__}: {e}", cfg)[:200])
 
+    if use_browser():  # Playwrightは1スレッド専用なので順番に処理する
+        try:
+            return [run(j) for j in jobs]
+        finally:
+            close_browser()
     with ThreadPoolExecutor(max_workers=8) as ex:
         return list(ex.map(run, jobs))
