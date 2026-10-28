@@ -12,6 +12,11 @@ on:
         options: [dryrun, test, heartbeat, scan]
       browser:
         description: "use real Chromium (Playwright)"
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      vpn:
+        description: "route through Cloudflare WARP"
         default: "true"
         type: choice
         options: ["true", "false"]
@@ -33,7 +38,8 @@ jobs:
       LABEL: "(GitHub)"
       STATE_FILE: ${{ github.workspace }}/state.json
       PYTHONUTF8: "1"
-      USE_BROWSER: ${{ github.event.inputs.browser != 'false' && '1' || '' }}
+      USE_BROWSER: ${{ github.event.inputs.browser == 'true' && '1' || '' }}
+      USE_VPN: ${{ github.event.inputs.vpn != 'false' && '1' || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -57,6 +63,27 @@ jobs:
           pip install playwright==1.48.0
           playwright install --with-deps chromium
 
+      - name: Install WARP
+        if: env.USE_VPN == '1'
+        run: |
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update
+          sudo apt-get install -y cloudflare-warp
+
+      - name: Connect WARP
+        if: env.USE_VPN == '1'
+        continue-on-error: true
+        run: |
+          warp-cli --accept-tos registration new
+          warp-cli --accept-tos connect
+          for i in $(seq 1 20); do
+            warp-cli --accept-tos status | grep -q "Status update: Connected" && break
+            sleep 2
+          done
+          warp-cli --accept-tos status
+          curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(warp|loc)=" || true
+
       - name: Run
         working-directory: src
         run: |
@@ -66,6 +93,10 @@ jobs:
             heartbeat) python3 local_runner.py --heartbeat ;;
             *)         python3 local_runner.py --auto-heartbeat ;;
           esac
+
+      - name: Disconnect WARP
+        if: always() && env.USE_VPN == '1'
+        run: warp-cli --accept-tos disconnect || true
 
       - name: Save state
         if: always() && hashFiles('state.json') != ''
