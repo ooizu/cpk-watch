@@ -1,0 +1,56 @@
+name: cpk-watch
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "scan / dryrun / test / heartbeat"
+        default: "dryrun"
+        type: choice
+        options: [dryrun, test, heartbeat, scan]
+
+concurrency:
+  group: cpk-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      LINE_CHANNEL_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
+      LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+      LABEL: "(GitHub)"
+      STATE_FILE: ${{ github.workspace }}/state.json
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+
+      - name: Run
+        working-directory: src
+        run: |
+          case "${{ github.event.inputs.action }}" in
+            dryrun)    python3 local_runner.py --dryrun ;;
+            test)      python3 local_runner.py --test ;;
+            heartbeat) python3 local_runner.py --heartbeat ;;
+            *)         python3 local_runner.py --auto-heartbeat ;;
+          esac
+
+      - name: Save state
+        if: always() && hashFiles('state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
